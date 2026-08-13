@@ -41,6 +41,12 @@ class FarmService : Service() {
     private lateinit var buf: ByteBuffer
     private var rs = 0; private var ps = 0
 
+    // ---- state ----
+    private var stalled = 0          // card drags with no screen change
+    private var lastEvent = ""       // which map event we walked into
+    private var idleCycles = 0       // watchdog counter
+    private var lastFrame = -1L
+
     override fun onBind(i: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -103,7 +109,7 @@ class FarmService : Service() {
         catch (_: Exception) {}
     }
 
-    // ---------------------------------------------------------- pixel helpers
+    // ================================================================ pixels
 
     private fun at(x: Int, y: Int): Px {
         val xx = x.coerceIn(0, sw - 1); val yy = y.coerceIn(0, sh - 1)
@@ -114,7 +120,7 @@ class FarmService : Service() {
     private fun isRed(c: Px) = c.r > 125 && c.r - c.g > 45 && c.r - c.b > 45
     private fun isGreen(c: Px) = c.g > 95 && c.g - c.r > 35 && c.g - c.b > 25
     private fun isBlue(c: Px) = c.b > 105 && c.b - c.r > 40 && c.b - c.g > 25
-    private fun isOrangeBtn(c: Px) = c.r > 205 && c.g in 120..205 && c.b < 120 && c.r - c.b > 110
+    private fun isOrangeBtn(c: Px) = c.r > 205 && c.g in 120..210 && c.b < 125 && c.r - c.b > 105
     private fun isBlueBtn(c: Px) = c.b > 150 && c.b - c.r > 45 && c.g > 90
     private fun isArrow(c: Px) = c.r in 120..200 && c.g in 45..110 && c.b in 30..95 && c.r - c.g > 45
     private fun isPink(c: Px) = c.r > 175 && c.b > 95 && c.g < 130 && c.r - c.g > 55
@@ -138,7 +144,29 @@ class FarmService : Service() {
         return s
     }
 
-    // ---------------------------------------------------------- detection
+    /** Majority of the centre band of one row matches. Immune to button text. */
+    private fun rowIs(y: Int, test: (Px) -> Boolean): Boolean {
+        val x0 = (sw * 0.36).toInt(); val x1 = (sw * 0.64).toInt()
+        var n = 0; var hit = 0
+        var x = x0
+        while (x <= x1) { if (test(at(x, y))) hit++; n++; x += 8 }
+        return n > 0 && hit.toDouble() / n > 0.45
+    }
+
+    private fun findButtonIn(y0: Double, y1: Double, test: (Px) -> Boolean): Int {
+        val minH = cfg.py(cfg.btnMinH)
+        var best = -1; var start = -1
+        var y = cfg.py(y0); val yEnd = cfg.py(y1)
+        while (y <= yEnd) {
+            if (rowIs(y, test)) { if (start < 0) start = y }
+            else { if (start >= 0 && y - start >= minH) best = start + (y - start) / 2; start = -1 }
+            y += 4
+        }
+        if (start >= 0 && yEnd - start >= minH) best = start + (yEnd - start) / 2
+        return best
+    }
+
+    // ================================================================ screens
 
     private fun inBattle(): Boolean =
         fraction(cfg.px(cfg.pauseX), cfg.py(cfg.pauseY), (sw * 0.022).toInt()) { isRed(it) } > 0.35
@@ -148,8 +176,7 @@ class FarmService : Service() {
         val y = cfg.py(cfg.bannerY)
         val minW = cfg.px(cfg.minCardW)
         var kind = ""; var start = -1
-        var x = cfg.px(cfg.scanX0)
-        val xEnd = cfg.px(cfg.scanX1)
+        var x = cfg.px(cfg.scanX0); val xEnd = cfg.px(cfg.scanX1)
         fun close(end: Int) {
             if (kind != "" && start >= 0 && end - start >= minW) out.add(Card(start + (end - start) / 2, kind))
         }
@@ -168,30 +195,6 @@ class FarmService : Service() {
             it.r > 200 && it.r - it.b > 120
         } >= cfg.specialFire
 
-    /** True if most pixels across the middle band of this row match. Text-proof. */
-    private fun rowIs(y: Int, test: (Px) -> Boolean): Boolean {
-        val x0 = (sw * 0.36).toInt(); val x1 = (sw * 0.64).toInt()
-        var n = 0; var hit = 0
-        var x = x0
-        while (x <= x1) { if (test(at(x, y))) hit++; n++; x += 8 }
-        return n > 0 && hit.toDouble() / n > 0.45
-    }
-
-    /** Lowest band of rows that are mostly this button colour. */
-    private fun findButton(test: (Px) -> Boolean): Int {
-        val minH = cfg.py(cfg.btnMinH)
-        var best = -1; var start = -1
-        var y = cfg.py(cfg.btnY0)
-        val yEnd = cfg.py(cfg.btnY1)
-        while (y <= yEnd) {
-            if (rowIs(y, test)) { if (start < 0) start = y }
-            else { if (start >= 0 && y - start >= minH) best = start + (y - start) / 2; start = -1 }
-            y += 4
-        }
-        if (start >= 0 && yEnd - start >= minH) best = start + (yEnd - start) / 2
-        return best
-    }
-
     private fun isCardGrid(): Boolean {
         val y = cfg.py(cfg.gridRow2Btn)
         var hits = 0
@@ -199,9 +202,16 @@ class FarmService : Service() {
         return hits >= 3
     }
 
+    /** A card detail popup: a big card-coloured block dead centre of the
+     *  screen while we're not in battle. Close it via the X, top right. */
+    private fun isCardPopup(): Boolean {
+        val cx = sw / 2; val cy = (sh * 0.46).toInt()
+        val f = fraction(cx, cy, (sw * 0.10).toInt()) { isRed(it) || isGreen(it) || isBlue(it) }
+        return f > 0.45
+    }
+
     private fun eventKind(cx: Int): String {
-        val y = cfg.py(cfg.eventBannerY)
-        val r = 60
+        val y = cfg.py(cfg.eventBannerY); val r = 60
         if (fraction(cx, y, r) { isGreen(it) } > 0.30) return "green"
         if (fraction(cx, y, r) { isPink(it) } > 0.30) return "pink"
         if (fraction(cx, y, r) { isCamp(it) } > 0.30) return "camp"
@@ -209,65 +219,93 @@ class FarmService : Service() {
         return ""
     }
 
-    // ---------------------------------------------------------- actions
+    // ================================================================ actions
 
     private fun tap(x: Int, y: Int) = GestureService.instance?.tap(x.toFloat(), y.toFloat())
 
-    private fun playCard(c: Card) {
-        GestureService.instance?.drag(
-            c.cx.toFloat(), cfg.py(cfg.artY).toFloat(),
-            cfg.px(cfg.dropX).toFloat(), cfg.py(cfg.dropY).toFloat(), cfg.dragMs
-        )
-    }
-
-    private var stalled = 0
-    private var lastEvent = ""
-
     private fun battleStep(changed: Boolean) {
-        if (specialReady()) { tap(cfg.px(cfg.specialX), cfg.py(cfg.specialY)); SystemClock.sleep(cfg.actionDelay); return }
+        // rule: the special fires the moment it is available
+        if (specialReady()) {
+            tap(cfg.px(cfg.specialX), cfg.py(cfg.specialY))
+            SystemClock.sleep(cfg.actionDelay); return
+        }
 
+        // rule: red first. If fury mode is on, no red means End Turn,
+        // because green/blue reset the special's charge and End Turn doesn't.
         val cards = handCards()
         var chosen: Card? = null
-        outer@ for (kind in cfg.priority) for (c in cards) if (c.kind == kind) { chosen = c; break@outer }
+        if (cfg.endTurnNoRed) {
+            for (c in cards) if (c.kind == "red") { chosen = c; break }
+        } else {
+            outer@ for (kind in cfg.priority) for (c in cards) if (c.kind == kind) { chosen = c; break@outer }
+        }
 
+        // nothing playable, or dragging isn't changing anything (no energy) -> End Turn
         if (chosen == null || stalled >= 2) {
             tap(cfg.px(cfg.endTurnX), cfg.py(cfg.endTurnY))
             stalled = 0
-            SystemClock.sleep(cfg.actionDelay)
-            return
+            SystemClock.sleep(cfg.actionDelay); return
         }
-        playCard(chosen)
+
+        // rule: press, hold, drag above the midline, release
+        GestureService.instance?.drag(
+            chosen.cx.toFloat(), cfg.py(cfg.artY).toFloat(),
+            cfg.px(cfg.dropX).toFloat(), cfg.py(cfg.dropY).toFloat(), cfg.dragMs
+        )
         stalled = if (changed) 0 else stalled + 1
         SystemClock.sleep(cfg.actionDelay)
     }
 
     private fun gridStep() {
-        val want = if (lastEvent == "green") "blue" else cfg.gridPick
+        // rule: expunger removes a BLUE defence card, workshop upgrades a RED attack card
+        val want = if (lastEvent == "green") "blue" else "red"
         val rows = listOf(Pair(cfg.gridRow1Banner, cfg.gridRow1Btn), Pair(cfg.gridRow2Banner, cfg.gridRow2Btn))
         for ((bannerY, btnY) in rows) {
             for (col in cfg.gridCols) {
                 val c = at(cfg.px(col), cfg.py(bannerY))
-                val match = when (want) {
-                    "red" -> isRed(c); "blue" -> isBlue(c); "green" -> isGreen(c); else -> isRed(c)
-                }
+                val match = if (want == "blue") isBlue(c) else isRed(c)
                 if (match) {
-                    tap(cfg.px(col), cfg.py(btnY))
+                    tap(cfg.px(col), cfg.py(btnY))          // Choose
                     SystemClock.sleep(900)
-                    tap(cfg.px(cfg.confirmX), cfg.py(cfg.confirmY))
+                    tap(cfg.px(cfg.confirmX), cfg.py(cfg.confirmY))  // Upgrade / Confirm
                     SystemClock.sleep(cfg.menuDelay)
                     lastEvent = ""
                     return
                 }
             }
         }
-        tap(cfg.px(cfg.fallbackX), cfg.py(cfg.fallbackY))
+        // no matching card on this screen: take whatever the first slot is so we don't stall
+        tap(cfg.px(cfg.gridCols[0]), cfg.py(cfg.gridRow1Btn))
+        SystemClock.sleep(900)
+        tap(cfg.px(cfg.confirmX), cfg.py(cfg.confirmY))
         SystemClock.sleep(cfg.menuDelay)
+        lastEvent = ""
     }
 
     private fun menuStep() {
-        if (isCardGrid()) { gridStep(); return }
+        // 1) card grids first. "Choose a Card" has a lone Skip below the
+        //    grid -> always Skip. (Checked before the popup detector,
+        //    because the centre of these screens is also a card.)
+        if (isCardGrid()) {
+            val skipY = findButtonIn(cfg.skipY0, cfg.skipY1, ::isOrangeBtn)
+            if (skipY > 0) { tap(cfg.px(cfg.btnX), skipY); SystemClock.sleep(cfg.menuDelay) }
+            else gridStep()
+            return
+        }
 
-        // event map with two choices
+        val orange = findButtonIn(cfg.btnY0, cfg.btnY1, ::isOrangeBtn)
+
+        // 2) card detail popup: a card fills the centre AND every orange
+        //    button is dimmed out behind the overlay. A normal card screen
+        //    always has a live orange Skip/Take/Collect, so it never
+        //    triggers this.
+        if (orange < 0 && isCardPopup()) {
+            tap(cfg.px(cfg.popupXx), cfg.py(cfg.popupXy))
+            SystemClock.sleep(cfg.menuDelay)
+            return
+        }
+
+        // 2) map with two choices: green > camp > workshop > pink
         val leftArrow = fraction(cfg.px(cfg.arrowLeftX), cfg.py(cfg.arrowY), 45) { isArrow(it) } > 0.30
         val rightArrow = fraction(cfg.px(cfg.arrowRightX), cfg.py(cfg.arrowY), 45) { isArrow(it) } > 0.30
         if (leftArrow && rightArrow) {
@@ -283,29 +321,28 @@ class FarmService : Service() {
             SystemClock.sleep(cfg.menuDelay); return
         }
 
-        // single node arrow
+        // 3) map with a single node
         if (fraction(cfg.px(cfg.arrowMidX), cfg.py(cfg.arrowMidY), 45) { isArrow(it) } > 0.30) {
             tap(cfg.px(cfg.arrowMidX), cfg.py(cfg.arrowMidY))
             SystemClock.sleep(cfg.menuDelay); return
         }
 
-        // Collect / Skip / Play without pack
-        val orange = findButton { isOrangeBtn(it) }
+        // 4) orange buttons: Collect / Skip / Play without pack.
+        //    Checked before blue so Victory taps Collect, never Upgrade.
         if (orange > 0) { tap(cfg.px(cfg.btnX), orange); SystemClock.sleep(cfg.menuDelay); return }
 
-        // New Adventure / Move On / Upgrade
-        val blue = findButton { isBlueBtn(it) }
+        // 5) blue buttons: New Adventure / Move On / continue screens
+        val blue = findButtonIn(cfg.btnY0, cfg.btnY1, ::isBlueBtn)
         if (blue > 0) { tap(cfg.px(cfg.btnX), blue); SystemClock.sleep(cfg.menuDelay); return }
 
-        // "tap anywhere to continue"
+        // 6) "tap to continue" and anything unrecognised
         tap(cfg.px(cfg.fallbackX), cfg.py(cfg.fallbackY))
         SystemClock.sleep(cfg.menuDelay)
     }
 
-    // ---------------------------------------------------------- loop
+    // ================================================================ loop
 
     private fun loop() {
-        var last = -1L
         while (running) {
             val image = reader?.acquireLatestImage()
             if (image == null) { SystemClock.sleep(60); continue }
@@ -313,9 +350,21 @@ class FarmService : Service() {
                 val plane = image.planes[0]
                 buf = plane.buffer; rs = plane.rowStride; ps = plane.pixelStride
                 val f = frameId()
-                val changed = f != last
-                last = f
-                if (inBattle()) battleStep(changed) else menuStep()
+                val changed = f != lastFrame
+                lastFrame = f
+
+                // watchdog: if the screen hasn't changed in a long while,
+                // whatever we've been doing isn't landing. Nudge the centre.
+                idleCycles = if (changed) 0 else idleCycles + 1
+                if (idleCycles >= cfg.watchdogAfter) {
+                    tap(cfg.px(cfg.fallbackX), cfg.py(cfg.fallbackY))
+                    idleCycles = 0
+                    SystemClock.sleep(cfg.menuDelay)
+                } else if (inBattle()) {
+                    battleStep(changed)
+                } else {
+                    menuStep()
+                }
             } catch (_: Exception) {
             } finally { image.close() }
             SystemClock.sleep(cfg.loopDelay)
@@ -335,3 +384,4 @@ class FarmService : Service() {
         super.onDestroy()
     }
 }
+

@@ -8,22 +8,18 @@ class Cfg(json: String) {
 
     val w = o.getJSONArray("screen").getInt(0)
     val h = o.getJSONArray("screen").getInt(1)
-
     fun px(r: Double) = (w * r).toInt()
     fun py(r: Double) = (h * r).toInt()
 
-    // battle marker: the pause button, top right
     val pauseX = d("pause_x"); val pauseY = d("pause_y")
 
-    // hand
-    val bannerY = d("banner_y")          // row through the card name banners
-    val artY = d("card_art_y")           // where to grab the card
+    val bannerY = d("banner_y")
+    val artY = d("card_art_y")
     val scanX0 = d("scan_x_min"); val scanX1 = d("scan_x_max")
     val minCardW = d("min_card_width")
     val priority: List<String> = o.getJSONArray("card_priority").let { a ->
         (0 until a.length()).map { a.getString(it) }
     }
-
     val dropX = d("drop_x"); val dropY = d("drop_y")
     val dragMs = o.getLong("drag_ms")
     val endTurnX = d("end_turn_x"); val endTurnY = d("end_turn_y")
@@ -32,12 +28,11 @@ class Cfg(json: String) {
     val specialR = d("special_radius")
     val specialFire = d("special_fire_threshold")
 
-    // menu button scanning
     val btnX = d("button_x")
     val btnY0 = d("button_y_min"); val btnY1 = d("button_y_max")
     val btnMinH = d("button_min_height")
+    val skipY0 = d("skip_y_min"); val skipY1 = d("skip_y_max")
 
-    // event map
     val arrowY = d("arrow_y")
     val arrowLeftX = d("arrow_left_x"); val arrowRightX = d("arrow_right_x")
     val arrowMidX = d("arrow_mid_x"); val arrowMidY = d("arrow_mid_y")
@@ -47,18 +42,19 @@ class Cfg(json: String) {
         (0 until a.length()).map { a.getString(it) }
     }
 
-    // card grid (workshop / remove)
     val gridCols = listOf(d("grid_col1"), d("grid_col2"), d("grid_col3"))
     val gridRow1Banner = d("grid_row1_banner_y"); val gridRow1Btn = d("grid_row1_button_y")
     val gridRow2Banner = d("grid_row2_banner_y"); val gridRow2Btn = d("grid_row2_button_y")
-    val gridPick = o.getString("grid_pick_colour")
     val confirmX = d("grid_confirm_x"); val confirmY = d("grid_confirm_y")
 
     val fallbackX = d("fallback_tap_x"); val fallbackY = d("fallback_tap_y")
+    val popupXx = d("popup_x_x"); val popupXy = d("popup_x_y")
+    val endTurnNoRed = o.getBoolean("end_turn_when_no_red")
 
     val actionDelay = (d("action_delay") * 1000).toLong()
     val loopDelay = (d("loop_delay") * 1000).toLong()
     val menuDelay = (d("menu_delay") * 1000).toLong()
+    val watchdogAfter = o.getInt("watchdog_after")
 
     companion object {
         fun default(w: Int, h: Int): String = """
@@ -84,6 +80,7 @@ class Cfg(json: String) {
   "button_x": 0.50,
   "button_y_min": 0.66, "button_y_max": 0.975,
   "button_min_height": 0.018,
+  "skip_y_min": 0.86, "skip_y_max": 0.965,
 
   "arrow_y": 0.677,
   "arrow_left_x": 0.25, "arrow_right_x": 0.75,
@@ -95,15 +92,18 @@ class Cfg(json: String) {
   "grid_col1": 0.167, "grid_col2": 0.50, "grid_col3": 0.833,
   "grid_row1_banner_y": 0.448, "grid_row1_button_y": 0.544,
   "grid_row2_banner_y": 0.698, "grid_row2_button_y": 0.794,
-  "grid_pick_colour": "red",
   "grid_confirm_x": 0.588, "grid_confirm_y": 0.952,
 
-  "fallback_tap_x": 0.50, "fallback_tap_y": 0.50,
+  "fallback_tap_x": 0.92, "fallback_tap_y": 0.18,
+  "popup_x_x": 0.79, "popup_x_y": 0.285,
+  "end_turn_when_no_red": true,
 
   "action_delay": 0.9,
-  "loop_delay": 0.7,
-  "menu_delay": 1.2
+  "loop_delay": 0.6,
+  "menu_delay": 1.2,
+  "watchdog_after": 12
 }
 """.trimIndent()
     }
 }
+
