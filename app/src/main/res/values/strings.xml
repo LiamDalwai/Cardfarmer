@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Card Farmer</string>
+    <string name="acc_desc">Lets Card Farmer tap and drag cards for you.</string>
+</resources>
