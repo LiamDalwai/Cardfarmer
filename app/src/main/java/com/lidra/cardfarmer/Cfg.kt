@@ -78,8 +78,8 @@ class Cfg(json: String) {
   "special_fire_threshold": 0.13,
 
   "button_x": 0.50,
-  "button_y_min": 0.62, "button_y_max": 0.975,
-  "button_min_height": 0.012,
+  "button_y_min": 0.66, "button_y_max": 0.975,
+  "button_min_height": 0.018,
   "skip_y_min": 0.86, "skip_y_max": 0.965,
 
   "arrow_y": 0.677,
