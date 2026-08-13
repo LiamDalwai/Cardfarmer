@@ -19,7 +19,8 @@ import android.view.WindowManager
 import android.widget.TextView
 import java.nio.ByteBuffer
 
-class Stats(val red: Double, val bright: Double, val sat: Double)
+class Stats(val bright: Double, val sat: Double)
+class Card(val cx: Int, val kind: String, val width: Int)
 
 class FarmService : Service() {
 
@@ -43,13 +44,9 @@ class FarmService : Service() {
     override fun onBind(i: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent == null || intent.action == ACTION_STOP) {
-            stopSelf()
-            return START_NOT_STICKY
-        }
+        if (intent == null || intent.action == ACTION_STOP) { stopSelf(); return START_NOT_STICKY }
 
         startForegroundCompat()
-
         cfg = Cfg(intent.getStringExtra(EXTRA_JSON) ?: "")
         val code = intent.getIntExtra(EXTRA_CODE, Activity.RESULT_CANCELED)
         @Suppress("DEPRECATION")
@@ -69,13 +66,11 @@ class FarmService : Service() {
         return START_STICKY
     }
 
-    // ---------------------------------------------------------------- setup
-
     private fun startForegroundCompat() {
         val id = "farm"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val ch = NotificationChannel(id, "Farming", NotificationManager.IMPORTANCE_LOW)
-            (getSystemService(NotificationManager::class.java)).createNotificationChannel(ch)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
         }
         val stop = PendingIntent.getService(
             this, 0,
@@ -88,12 +83,9 @@ class FarmService : Service() {
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentIntent(stop)
             .build()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
             startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-        } else {
-            startForeground(1, n)
-        }
+        else startForeground(1, n)
     }
 
     private fun startCapture() {
@@ -103,7 +95,6 @@ class FarmService : Service() {
         wm.defaultDisplay.getRealMetrics(m)
         screenW = m.widthPixels
         screenH = m.heightPixels
-
         reader = ImageReader.newInstance(screenW, screenH, PixelFormat.RGBA_8888, 2)
         display = projection?.createVirtualDisplay(
             "cardfarmer", screenW, screenH, m.densityDpi,
@@ -123,8 +114,7 @@ class FarmService : Service() {
         }
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        else
-            @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+        else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -132,7 +122,7 @@ class FarmService : Service() {
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = 0; y = 200 }
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = 0; y = 300 }
 
         try {
             (getSystemService(Context.WINDOW_SERVICE) as WindowManager).addView(tv, lp)
@@ -140,16 +130,21 @@ class FarmService : Service() {
         } catch (_: Exception) { }
     }
 
-    // ---------------------------------------------------------------- pixels
+    // ------------------------------------------------------------ pixels
 
-    private fun sample(buf: ByteBuffer, rowStride: Int, pixStride: Int,
-                       cx: Int, cy: Int, r: Int): Stats {
+    private fun classify(r: Int, g: Int, b: Int): String {
+        if (r > 125 && r - g > 45 && r - b > 45) return "red"
+        if (g > 95 && g - r > 35 && g - b > 25) return "green"
+        if (b > 105 && b - r > 40 && b - g > 25) return "blue"
+        return ""
+    }
+
+    private fun stats(buf: ByteBuffer, rowStride: Int, pixStride: Int,
+                      cx: Int, cy: Int, r: Int): Stats {
         val x0 = maxOf(0, cx - r); val x1 = minOf(screenW - 1, cx + r)
         val y0 = maxOf(0, cy - r); val y1 = minOf(screenH - 1, cy + r)
-        if (x1 <= x0 || y1 <= y0) return Stats(0.0, 0.0, 0.0)
-
-        var n = 0; var redHits = 0
-        var sumBright = 0L; var sumSat = 0.0
+        if (x1 <= x0 || y1 <= y0) return Stats(0.0, 0.0)
+        var n = 0; var sumB = 0L; var sumS = 0.0
         var y = y0
         while (y <= y1) {
             var x = x0
@@ -158,17 +153,48 @@ class FarmService : Service() {
                 val r8 = buf.get(p).toInt() and 0xFF
                 val g8 = buf.get(p + 1).toInt() and 0xFF
                 val b8 = buf.get(p + 2).toInt() and 0xFF
-                if (r8 > 100 && r8 - g8 > 45 && r8 - b8 > 40) redHits++
-                sumBright += (r8 + g8 + b8)
+                sumB += (r8 + g8 + b8)
                 val mx = maxOf(r8, maxOf(g8, b8)); val mn = minOf(r8, minOf(g8, b8))
-                sumSat += (mx - mn).toDouble() / (mx + 1).toDouble()
-                n++
-                x += 3
+                sumS += (mx - mn).toDouble() / (mx + 1).toDouble()
+                n++; x += 4
             }
-            y += 3
+            y += 4
         }
-        if (n == 0) return Stats(0.0, 0.0, 0.0)
-        return Stats(redHits.toDouble() / n, sumBright.toDouble() / (n * 3 * 255), sumSat / n)
+        if (n == 0) return Stats(0.0, 0.0)
+        return Stats(sumB.toDouble() / (n * 3 * 255), sumS / n)
+    }
+
+    /** Walks the banner row and picks out every coloured card, wherever it sits. */
+    private fun scanCards(buf: ByteBuffer, rowStride: Int, pixStride: Int): List<Card> {
+        val out = ArrayList<Card>()
+        var runKind = ""
+        var runStart = -1
+        var x = cfg.scanXMin
+        val y = cfg.scanY.coerceIn(0, screenH - 1)
+
+        fun close(endX: Int) {
+            if (runKind != "" && runStart >= 0) {
+                val wd = endX - runStart
+                if (wd >= cfg.minWidth) out.add(Card(runStart + wd / 2, runKind, wd))
+            }
+        }
+
+        while (x <= minOf(cfg.scanXMax, screenW - 1)) {
+            val p = y * rowStride + x * pixStride
+            val k = classify(
+                buf.get(p).toInt() and 0xFF,
+                buf.get(p + 1).toInt() and 0xFF,
+                buf.get(p + 2).toInt() and 0xFF
+            )
+            if (k != runKind) {
+                close(x)
+                runKind = k
+                runStart = if (k != "") x else -1
+            }
+            x += 5
+        }
+        close(minOf(cfg.scanXMax, screenW - 1))
+        return out
     }
 
     private fun frameId(buf: ByteBuffer, rowStride: Int, pixStride: Int): Long {
@@ -176,20 +202,18 @@ class FarmService : Service() {
         var y = 0
         while (y < screenH) {
             var x = 0
-            while (x < screenW) {
-                sum += (buf.get(y * rowStride + x * pixStride).toInt() and 0xFF)
-                x += 40
-            }
+            while (x < screenW) { sum += (buf.get(y * rowStride + x * pixStride).toInt() and 0xFF); x += 40 }
             y += 40
         }
         return sum
     }
 
-    // ---------------------------------------------------------------- loop
+    // ------------------------------------------------------------ loop
 
     private fun loop() {
         var idle = 0
         var last = -1L
+        var turnStarted = true
 
         while (running) {
             val image = reader?.acquireLatestImage()
@@ -200,33 +224,42 @@ class FarmService : Service() {
             try {
                 val plane = image.planes[0]
                 val buf = plane.buffer
-                val rowStride = plane.rowStride
-                val pixStride = plane.pixelStride
-                frame = frameId(buf, rowStride, pixStride)
+                val rs = plane.rowStride
+                val ps = plane.pixelStride
+                frame = frameId(buf, rs, ps)
 
-                val sp = sample(buf, rowStride, pixStride, cfg.special.first, cfg.special.second, cfg.specialRadius)
-                if (sp.sat >= cfg.specialSat && sp.bright >= cfg.specialBright) {
-                    tap(cfg.special.first, cfg.special.second)
+                val sp = stats(buf, rs, ps, cfg.special.first, cfg.special.second, cfg.specialRadius)
+                val specialUp = if (cfg.specialMode == "always_try") turnStarted
+                                else (sp.sat >= cfg.specialSat && sp.bright >= cfg.specialBright)
+
+                if (specialUp) {
+                    GestureService.instance?.tap(cfg.special.first.toFloat(), cfg.special.second.toFloat())
+                    turnStarted = false
                     acted = true
                 } else {
-                    var bestIdx = -1
-                    var bestRed = 0.0
-                    for (i in cfg.hand.indices) {
-                        val (hx, hy) = cfg.hand[i]
-                        val s = sample(buf, rowStride, pixStride, hx, hy, cfg.cardRadius)
-                        if (s.red >= cfg.redThreshold && s.bright >= cfg.dimThreshold && s.red > bestRed) {
-                            bestRed = s.red; bestIdx = i
+                    val cards = scanCards(buf, rs, ps)
+                    var chosen: Card? = null
+
+                    outer@ for (kind in cfg.priority) {
+                        for (c in cards) {
+                            if (c.kind != kind) continue
+                            val artY = (cfg.scanY + cfg.artOffset).coerceIn(0, screenH - 1)
+                            val s = stats(buf, rs, ps, c.cx, artY, 40)
+                            if (s.bright >= cfg.dimThreshold) { chosen = c; break@outer }
                         }
                     }
-                    if (bestIdx >= 0) {
-                        val (hx, hy) = cfg.hand[bestIdx]
-                        GestureService.instance?.swipe(
-                            hx.toFloat(), hy.toFloat(),
-                            cfg.target.first.toFloat(), cfg.target.second.toFloat(), 380
+
+                    if (chosen != null) {
+                        val artY = (cfg.scanY + cfg.artOffset).toFloat()
+                        GestureService.instance?.drag(
+                            chosen.cx.toFloat(), artY,
+                            cfg.target.first.toFloat(), cfg.target.second.toFloat(),
+                            cfg.dragMs
                         )
                         acted = true
                     } else {
-                        tap(cfg.endTurn.first, cfg.endTurn.second)
+                        GestureService.instance?.tap(cfg.endTurn.first.toFloat(), cfg.endTurn.second.toFloat())
+                        turnStarted = true
                     }
                 }
             } catch (_: Exception) {
@@ -240,22 +273,15 @@ class FarmService : Service() {
 
             if (idle >= cfg.stuckAfter) {
                 for (s in cfg.postBattle) {
-                    tap(s.x, s.y)
+                    GestureService.instance?.tap(s.x.toFloat(), s.y.toFloat())
                     SystemClock.sleep(s.wait)
                 }
-                idle = 0
-                last = -1L
+                idle = 0; last = -1L; turnStarted = true
             }
 
             SystemClock.sleep(if (acted) cfg.actionDelay else cfg.loopDelay)
         }
     }
-
-    private fun tap(x: Int, y: Int) {
-        GestureService.instance?.tap(x.toFloat(), y.toFloat())
-    }
-
-    // ---------------------------------------------------------------- teardown
 
     override fun onDestroy() {
         running = false
