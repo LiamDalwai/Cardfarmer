@@ -102,7 +102,7 @@ class Cfg(json: String) {
 
   "action_delay": 0.9,
   "loop_delay": 0.7,
-  "menu_delay": 1.6
+  "menu_delay": 1.2
 }
 """.trimIndent()
     }

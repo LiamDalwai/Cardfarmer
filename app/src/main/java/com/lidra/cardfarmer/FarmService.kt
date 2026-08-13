@@ -168,15 +168,23 @@ class FarmService : Service() {
             it.r > 200 && it.r - it.b > 120
         } >= cfg.specialFire
 
-    /** Lowest solid run of a button colour down the centre of the screen. */
+    /** True if most pixels across the middle band of this row match. Text-proof. */
+    private fun rowIs(y: Int, test: (Px) -> Boolean): Boolean {
+        val x0 = (sw * 0.36).toInt(); val x1 = (sw * 0.64).toInt()
+        var n = 0; var hit = 0
+        var x = x0
+        while (x <= x1) { if (test(at(x, y))) hit++; n++; x += 8 }
+        return n > 0 && hit.toDouble() / n > 0.45
+    }
+
+    /** Lowest band of rows that are mostly this button colour. */
     private fun findButton(test: (Px) -> Boolean): Int {
-        val x = cfg.px(cfg.btnX)
         val minH = cfg.py(cfg.btnMinH)
         var best = -1; var start = -1
         var y = cfg.py(cfg.btnY0)
         val yEnd = cfg.py(cfg.btnY1)
         while (y <= yEnd) {
-            if (test(at(x, y))) { if (start < 0) start = y }
+            if (rowIs(y, test)) { if (start < 0) start = y }
             else { if (start >= 0 && y - start >= minH) best = start + (y - start) / 2; start = -1 }
             y += 4
         }
@@ -213,6 +221,7 @@ class FarmService : Service() {
     }
 
     private var stalled = 0
+    private var lastEvent = ""
 
     private fun battleStep(changed: Boolean) {
         if (specialReady()) { tap(cfg.px(cfg.specialX), cfg.py(cfg.specialY)); SystemClock.sleep(cfg.actionDelay); return }
@@ -233,7 +242,7 @@ class FarmService : Service() {
     }
 
     private fun gridStep() {
-        val want = cfg.gridPick
+        val want = if (lastEvent == "green") "blue" else cfg.gridPick
         val rows = listOf(Pair(cfg.gridRow1Banner, cfg.gridRow1Btn), Pair(cfg.gridRow2Banner, cfg.gridRow2Btn))
         for ((bannerY, btnY) in rows) {
             for (col in cfg.gridCols) {
@@ -246,6 +255,7 @@ class FarmService : Service() {
                     SystemClock.sleep(900)
                     tap(cfg.px(cfg.confirmX), cfg.py(cfg.confirmY))
                     SystemClock.sleep(cfg.menuDelay)
+                    lastEvent = ""
                     return
                 }
             }
@@ -268,6 +278,7 @@ class FarmService : Service() {
                 if (l == p) { pickLeft = true; break }
                 if (r == p) { pickLeft = false; break }
             }
+            lastEvent = if (pickLeft) l else r
             tap(cfg.px(if (pickLeft) cfg.arrowLeftX else cfg.arrowRightX), cfg.py(cfg.arrowY))
             SystemClock.sleep(cfg.menuDelay); return
         }
