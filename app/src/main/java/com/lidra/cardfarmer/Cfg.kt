@@ -2,86 +2,107 @@ package com.lidra.cardfarmer
 
 import org.json.JSONObject
 
-class Step(val name: String, val x: Int, val y: Int, val wait: Long)
-
 class Cfg(json: String) {
     private val o = JSONObject(json)
-    private fun pt(k: String): Pair<Int, Int> {
-        val a = o.getJSONArray(k); return Pair(a.getInt(0), a.getInt(1))
-    }
+    private fun d(k: String) = o.getDouble(k)
 
-    // the strip across the card name banners
-    val scanY = o.getInt("card_scan_y")
-    val scanXMin = o.getInt("card_scan_x_min")
-    val scanXMax = o.getInt("card_scan_x_max")
-    val minWidth = o.getInt("card_min_width")
-    val artOffset = o.getInt("card_art_offset_y")
+    val w = o.getJSONArray("screen").getInt(0)
+    val h = o.getJSONArray("screen").getInt(1)
 
+    fun px(r: Double) = (w * r).toInt()
+    fun py(r: Double) = (h * r).toInt()
+
+    // battle marker: the pause button, top right
+    val pauseX = d("pause_x"); val pauseY = d("pause_y")
+
+    // hand
+    val bannerY = d("banner_y")          // row through the card name banners
+    val artY = d("card_art_y")           // where to grab the card
+    val scanX0 = d("scan_x_min"); val scanX1 = d("scan_x_max")
+    val minCardW = d("min_card_width")
     val priority: List<String> = o.getJSONArray("card_priority").let { a ->
         (0 until a.length()).map { a.getString(it) }
     }
 
-    val target = pt("enemy_target")
+    val dropX = d("drop_x"); val dropY = d("drop_y")
     val dragMs = o.getLong("drag_ms")
+    val endTurnX = d("end_turn_x"); val endTurnY = d("end_turn_y")
 
-    val special = pt("special_button")
-    val specialRadius = o.getInt("special_sample_radius")
-    val specialMode = o.getString("special_mode")   // "detect" or "always_try"
-    val specialSat = o.getDouble("special_ready_saturation")
-    val specialBright = o.getDouble("special_ready_brightness")
+    val specialX = d("special_x"); val specialY = d("special_y")
+    val specialR = d("special_radius")
+    val specialFire = d("special_fire_threshold")
 
-    val endTurn = pt("end_turn_button")
+    // menu button scanning
+    val btnX = d("button_x")
+    val btnY0 = d("button_y_min"); val btnY1 = d("button_y_max")
+    val btnMinH = d("button_min_height")
 
-    val postBattle: List<Step> = o.getJSONArray("post_battle_sequence").let { arr ->
-        (0 until arr.length()).map {
-            val s = arr.getJSONObject(it)
-            Step(s.getString("name"), s.getInt("x"), s.getInt("y"), (s.getDouble("wait") * 1000).toLong())
-        }
+    // event map
+    val arrowY = d("arrow_y")
+    val arrowLeftX = d("arrow_left_x"); val arrowRightX = d("arrow_right_x")
+    val arrowMidX = d("arrow_mid_x"); val arrowMidY = d("arrow_mid_y")
+    val bannerLeftX = d("event_banner_left_x"); val bannerRightX = d("event_banner_right_x")
+    val eventBannerY = d("event_banner_y")
+    val eventPriority: List<String> = o.getJSONArray("event_priority").let { a ->
+        (0 until a.length()).map { a.getString(it) }
     }
 
-    val dimThreshold = o.getDouble("dim_threshold")
-    val actionDelay = (o.getDouble("action_delay") * 1000).toLong()
-    val loopDelay = (o.getDouble("loop_delay") * 1000).toLong()
-    val stuckAfter = o.getInt("stuck_after")
+    // card grid (workshop / remove)
+    val gridCols = listOf(d("grid_col1"), d("grid_col2"), d("grid_col3"))
+    val gridRow1Banner = d("grid_row1_banner_y"); val gridRow1Btn = d("grid_row1_button_y")
+    val gridRow2Banner = d("grid_row2_banner_y"); val gridRow2Btn = d("grid_row2_button_y")
+    val gridPick = o.getString("grid_pick_colour")
+    val confirmX = d("grid_confirm_x"); val confirmY = d("grid_confirm_y")
+
+    val fallbackX = d("fallback_tap_x"); val fallbackY = d("fallback_tap_y")
+
+    val actionDelay = (d("action_delay") * 1000).toLong()
+    val loopDelay = (d("loop_delay") * 1000).toLong()
+    val menuDelay = (d("menu_delay") * 1000).toLong()
 
     companion object {
-        private fun rx(w: Int, r: Double) = (w * r).toInt()
-        private fun ry(h: Int, r: Double) = (h * r).toInt()
-
-        /** Ratios measured off a 1080x2400 Card Guardians screen. */
         fun default(w: Int, h: Int): String = """
 {
   "screen": [$w, $h],
 
-  "card_scan_y": ${ry(h, 0.8217)},
-  "card_scan_x_min": ${rx(w, 0.03)},
-  "card_scan_x_max": ${rx(w, 0.97)},
-  "card_min_width": ${rx(w, 0.09)},
-  "card_art_offset_y": ${-ry(h, 0.058)},
+  "pause_x": 0.940, "pause_y": 0.079,
+
+  "banner_y": 0.822,
+  "card_art_y": 0.762,
+  "scan_x_min": 0.03, "scan_x_max": 0.97,
+  "min_card_width": 0.085,
   "card_priority": ["red", "green", "blue"],
 
-  "enemy_target": [${rx(w, 0.50)}, ${ry(h, 0.333)}],
-  "drag_ms": 650,
+  "drop_x": 0.50, "drop_y": 0.330,
+  "drag_ms": 500,
+  "end_turn_x": 0.630, "end_turn_y": 0.953,
 
-  "special_button": [${rx(w, 0.884)}, ${ry(h, 0.560)}],
-  "special_sample_radius": ${rx(w, 0.05)},
-  "special_mode": "detect",
-  "special_ready_saturation": 0.30,
-  "special_ready_brightness": 0.25,
+  "special_x": 0.884, "special_y": 0.560,
+  "special_radius": 0.048,
+  "special_fire_threshold": 0.13,
 
-  "end_turn_button": [${rx(w, 0.630)}, ${ry(h, 0.953)}],
+  "button_x": 0.50,
+  "button_y_min": 0.66, "button_y_max": 0.975,
+  "button_min_height": 0.018,
 
-  "post_battle_sequence": [
-    {"name": "collect", "x": ${rx(w, 0.50)}, "y": ${ry(h, 0.8375)}, "wait": 2.0},
-    {"name": "skip card", "x": ${rx(w, 0.50)}, "y": ${ry(h, 0.7229)}, "wait": 2.0},
-    {"name": "next fight", "x": ${rx(w, 0.50)}, "y": ${ry(h, 0.7083)}, "wait": 2.5},
-    {"name": "next fight again", "x": ${rx(w, 0.50)}, "y": ${ry(h, 0.7083)}, "wait": 2.5}
-  ],
+  "arrow_y": 0.677,
+  "arrow_left_x": 0.25, "arrow_right_x": 0.75,
+  "arrow_mid_x": 0.50, "arrow_mid_y": 0.708,
+  "event_banner_left_x": 0.25, "event_banner_right_x": 0.75,
+  "event_banner_y": 0.477,
+  "event_priority": ["green", "camp", "workshop", "pink"],
 
-  "dim_threshold": 0.16,
-  "action_delay": 1.2,
+  "grid_col1": 0.167, "grid_col2": 0.50, "grid_col3": 0.833,
+  "grid_row1_banner_y": 0.448, "grid_row1_button_y": 0.544,
+  "grid_row2_banner_y": 0.698, "grid_row2_button_y": 0.794,
+  "grid_pick_colour": "red",
+  "grid_confirm_x": 0.588, "grid_confirm_y": 0.952,
+
+  "fallback_tap_x": 0.50, "fallback_tap_y": 0.50,
+
+  "action_delay": 0.9,
   "loop_delay": 0.7,
-  "stuck_after": 4
+  "menu_delay": 1.6
 }
 """.trimIndent()
     }
