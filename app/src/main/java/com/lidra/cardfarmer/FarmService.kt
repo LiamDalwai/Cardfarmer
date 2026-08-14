@@ -20,7 +20,6 @@ import android.widget.TextView
 import java.nio.ByteBuffer
 
 class Px(val r: Int, val g: Int, val b: Int)
-class Card(val cx: Int, val kind: String)
 
 class FarmService : Service() {
 
@@ -42,7 +41,6 @@ class FarmService : Service() {
     private var rs = 0; private var ps = 0
 
     // ---- state ----
-    private var stalled = 0          // card drags with no screen change
     private var lastEvent = ""       // which map event we walked into
     private var idleCycles = 0       // watchdog counter
     private var lastFrame = -1L
@@ -120,7 +118,7 @@ class FarmService : Service() {
     private fun isRed(c: Px) = c.r > 125 && c.r - c.g > 45 && c.r - c.b > 45
     private fun isGreen(c: Px) = c.g > 95 && c.g - c.r > 35 && c.g - c.b > 25
     private fun isBlue(c: Px) = c.b > 105 && c.b - c.r > 40 && c.b - c.g > 25
-    private fun isOrangeBtn(c: Px) = c.r > 205 && c.g in 120..210 && c.b < 125 && c.r - c.b > 105
+    private fun isOrangeBtn(c: Px) = c.r > 195 && c.g in 105..228 && c.b < 175 && c.r - c.g > 22 && c.r - c.b > 70
     private fun isBlueBtn(c: Px) = c.b > 150 && c.b - c.r > 45 && c.g > 90
     private fun isArrow(c: Px) = c.r in 120..200 && c.g in 45..110 && c.b in 30..95 && c.r - c.g > 45
     private fun isPink(c: Px) = c.r > 175 && c.b > 95 && c.g < 130 && c.r - c.g > 55
@@ -146,11 +144,11 @@ class FarmService : Service() {
 
     /** Majority of the centre band of one row matches. Immune to button text. */
     private fun rowIs(y: Int, test: (Px) -> Boolean): Boolean {
-        val x0 = (sw * 0.36).toInt(); val x1 = (sw * 0.64).toInt()
+        val x0 = (sw * 0.30).toInt(); val x1 = (sw * 0.70).toInt()
         var n = 0; var hit = 0
         var x = x0
-        while (x <= x1) { if (test(at(x, y))) hit++; n++; x += 8 }
-        return n > 0 && hit.toDouble() / n > 0.45
+        while (x <= x1) { if (test(at(x, y))) hit++; n++; x += 6 }
+        return n > 0 && hit.toDouble() / n > 0.30
     }
 
     private fun findButtonIn(y0: Double, y1: Double, test: (Px) -> Boolean): Int {
@@ -168,26 +166,15 @@ class FarmService : Service() {
 
     // ================================================================ screens
 
-    private fun inBattle(): Boolean =
-        fraction(cfg.px(cfg.pauseX), cfg.py(cfg.pauseY), (sw * 0.022).toInt()) { isRed(it) } > 0.35
-
-    private fun handCards(): List<Card> {
-        val out = ArrayList<Card>()
-        val y = cfg.py(cfg.bannerY)
-        val minW = cfg.px(cfg.minCardW)
-        var kind = ""; var start = -1
-        var x = cfg.px(cfg.scanX0); val xEnd = cfg.px(cfg.scanX1)
-        fun close(end: Int) {
-            if (kind != "" && start >= 0 && end - start >= minW) out.add(Card(start + (end - start) / 2, kind))
-        }
-        while (x <= xEnd) {
-            val c = at(x, y)
-            val k = when { isRed(c) -> "red"; isGreen(c) -> "green"; isBlue(c) -> "blue"; else -> "" }
-            if (k != kind) { close(x); kind = k; start = if (k != "") x else -1 }
-            x += 5
-        }
-        close(xEnd)
-        return out
+    /** In a fight only if BOTH the pause button and the End Turn button are
+     *  on screen. The pause button alone is not enough: it stays visible
+     *  behind the dimmed Victory overlay, which used to make the bot think it
+     *  was still fighting and hammer End Turn instead of tapping Collect. */
+    private fun inBattle(): Boolean {
+        val pause = fraction(cfg.px(cfg.pauseX), cfg.py(cfg.pauseY), (sw * 0.022).toInt()) { isRed(it) } > 0.35
+        if (!pause) return false
+        val endTurn = fraction(cfg.px(cfg.endTurnX), cfg.py(cfg.endTurnY), (sw * 0.037).toInt()) { isBlueBtn(it) } > 0.30
+        return endTurn
     }
 
     private fun specialReady(): Boolean =
@@ -223,42 +210,152 @@ class FarmService : Service() {
 
     private fun tap(x: Int, y: Int) = GestureService.instance?.tap(x.toFloat(), y.toFloat())
 
-    private fun battleStep(changed: Boolean) {
-        // rule: the special fires the moment it is available
+    private var lastHandSig = ""
+    private var noProgress = 0
+    private var candidate = 0
+
+    /** Read the whole hand: one entry per card, left to right.
+     *
+     *  A card is a big solid block of its colour, so a wide horizontal run of
+     *  a card colour IS a card. The whole hand band is swept rather than one
+     *  fixed row, because the hand fans out, shifts with how many cards you
+     *  hold, and sits at different heights on different screens - a fixed row
+     *  drifts onto artwork and misreads everything.
+     *
+     *  Runs are grouped into one cluster per card, and within a cluster the
+     *  WIDEST run decides that card's colour. That matters because artwork
+     *  lies: the green Bottled Fury card has red-orange art inside it and
+     *  would otherwise register as a red card. Its green name banner is wider
+     *  than the red fragment, so the banner wins.
+     */
+    private fun readHand(): List<Pair<String, Pair<Int, Int>>> {
+        val minW = cfg.px(cfg.minCardW)
+        val maxW = cfg.px(0.34)
+        val merge = cfg.px(0.13)
+        // each entry: width, centre x, row y, colour
+        val clusters = ArrayList<Array<Any>>()
+
+        fun add(w: Int, cx: Int, cy: Int, kind: String) {
+            for (i in clusters.indices) {
+                val fx = clusters[i][1] as Int
+                if (kotlin.math.abs(fx - cx) < merge) {
+                    if (w > clusters[i][0] as Int) clusters[i] = arrayOf(w, cx, cy, kind)
+                    return
+                }
+            }
+            clusters.add(arrayOf(w, cx, cy, kind))
+        }
+
+        for (kind in listOf("red", "green", "blue")) {
+            val test: (Px) -> Boolean = when (kind) {
+                "red" -> ::isRed
+                "green" -> ::isGreen
+                else -> ::isBlue
+            }
+            var y = cfg.py(cfg.handBandTop)
+            val yEnd = cfg.py(cfg.handBandBottom)
+            while (y <= yEnd) {
+                var start = -1
+                var x = cfg.px(0.02)
+                val xEnd = cfg.px(0.98)
+                while (x <= xEnd) {
+                    val hit = test(at(x, y))
+                    if (hit && start < 0) start = x
+                    else if (!hit && start >= 0) {
+                        val w = x - start
+                        if (w in minW..maxW) add(w, start + w / 2, y, kind)
+                        start = -1
+                    }
+                    x += 4
+                }
+                if (start >= 0) {
+                    val w = xEnd - start
+                    if (w in minW..maxW) add(w, start + w / 2, y, kind)
+                }
+                y += 4
+            }
+        }
+
+        return clusters
+            .sortedBy { it[1] as Int }
+            .map { Pair(it[3] as String, Pair(it[1] as Int, it[2] as Int)) }
+    }
+
+    /** One decision inside a fight.
+     *
+     *  Stall detection watches the HAND, not the whole screen. A battle screen
+     *  animates constantly (flames, the enemy idling, the special glowing), so
+     *  "did the screen change" is always true and can never tell us we're stuck.
+     *  What actually changes when a card is played is the hand.
+     */
+    private fun battleStep() {
+        // 1. the special fires the instant it lights up
         if (specialReady()) {
             tap(cfg.px(cfg.specialX), cfg.py(cfg.specialY))
+            noProgress = 0; candidate = 0
             SystemClock.sleep(cfg.actionDelay); return
         }
 
-        // rule: red first. If fury mode is on, no red means End Turn,
-        // because green/blue reset the special's charge and End Turn doesn't.
-        val cards = handCards()
-        var chosen: Card? = null
-        if (cfg.endTurnNoRed) {
-            for (c in cards) if (c.kind == "red") { chosen = c; break }
+        // 2. read the whole hand, one entry per card, left to right
+        val hand = readHand()
+        val reds = hand.filter { it.first == "red" }.map { it.second }
+        val greens = hand.filter { it.first == "green" }.map { it.second }
+
+        // 3. has the hand actually changed since the last attempt?
+        val sig = hand.joinToString(",") { it.first + (it.second.first / 20) }
+        if (sig == lastHandSig) {
+            noProgress++
+            candidate++          // last pick didn't work, try the next card
         } else {
-            outer@ for (kind in cfg.priority) for (c in cards) if (c.kind == kind) { chosen = c; break@outer }
+            noProgress = 0
+            candidate = 0        // new hand, start from the left again
         }
+        lastHandSig = sig
 
-        // nothing playable, or dragging isn't changing anything (no energy) -> End Turn
-        if (chosen == null || stalled >= 2) {
-            tap(cfg.px(cfg.endTurnX), cfg.py(cfg.endTurnY))
-            stalled = 0
+        // 4. a card left selected and floating would trap us, so shake it loose
+        if (noProgress >= 6) {
+            GestureService.instance?.drag(
+                sw * 0.5f, sh * 0.45f, sw * 0.5f, sh * 0.95f, 400
+            )
+            noProgress = 0; candidate = 0
             SystemClock.sleep(cfg.actionDelay); return
         }
 
-        // rule: press, hold, drag above the midline, release
+        // 5. build the play list. Red always, left to right. Green only if
+        //    fury mode is off, because playing green resets the special's
+        //    charge while ending the turn does not. Blue never.
+        val playable = ArrayList<Pair<Int, Int>>()
+        playable.addAll(reds)
+        if (!cfg.endTurnNoRed) playable.addAll(greens)
+
+        // 6. nothing left to try -> End Turn
+        if (playable.isEmpty() || candidate >= playable.size) {
+            tap(cfg.px(cfg.endTurnX), cfg.py(cfg.endTurnY))
+            noProgress = 0; candidate = 0
+            SystemClock.sleep(cfg.actionDelay); return
+        }
+
+        val chosen = playable[candidate]
+
+        // 7. last safety check: never begin a drag on a spot that reads blue
+        if (fraction(chosen.first, chosen.second, 25) { isBlue(it) } > 0.35) {
+            candidate++
+            SystemClock.sleep(cfg.loopDelay); return
+        }
+
+        // 8. press, hold, drag above the midline, release
         GestureService.instance?.drag(
-            chosen.cx.toFloat(), cfg.py(cfg.artY).toFloat(),
+            chosen.first.toFloat(), chosen.second.toFloat(),
             cfg.px(cfg.dropX).toFloat(), cfg.py(cfg.dropY).toFloat(), cfg.dragMs
         )
-        stalled = if (changed) 0 else stalled + 1
         SystemClock.sleep(cfg.actionDelay)
     }
 
     private fun gridStep() {
-        // rule: expunger removes a BLUE defence card, workshop upgrades a RED attack card
-        val want = if (lastEvent == "green") "blue" else "red"
+        // rule: workshop upgrades a RED attack card. Everything else,
+        // including anything we're unsure about, touches a BLUE defence
+        // card only, so an attack card can never be removed by mistake.
+        val want = if (lastEvent == "workshop") "red" else "blue"
         val rows = listOf(Pair(cfg.gridRow1Banner, cfg.gridRow1Btn), Pair(cfg.gridRow2Banner, cfg.gridRow2Btn))
         for ((bannerY, btnY) in rows) {
             for (col in cfg.gridCols) {
@@ -274,10 +371,16 @@ class FarmService : Service() {
                 }
             }
         }
-        // no matching card on this screen: take whatever the first slot is so we don't stall
-        tap(cfg.px(cfg.gridCols[0]), cfg.py(cfg.gridRow1Btn))
-        SystemClock.sleep(900)
-        tap(cfg.px(cfg.confirmX), cfg.py(cfg.confirmY))
+        // No card of the wanted colour on screen. On a REMOVE screen we would
+        // rather back out than delete the wrong thing, so only the workshop
+        // falls back to taking slot one.
+        if (lastEvent == "workshop") {
+            tap(cfg.px(cfg.gridCols[0]), cfg.py(cfg.gridRow1Btn))
+            SystemClock.sleep(900)
+            tap(cfg.px(cfg.confirmX), cfg.py(cfg.confirmY))
+        } else {
+            tap(cfg.px(cfg.fallbackX), cfg.py(cfg.fallbackY))
+        }
         SystemClock.sleep(cfg.menuDelay)
         lastEvent = ""
     }
@@ -321,8 +424,10 @@ class FarmService : Service() {
             SystemClock.sleep(cfg.menuDelay); return
         }
 
-        // 3) map with a single node
+        // 3) map with a single node. Read its banner too, so a lone
+        //    Expunger's Lair is still known to be a REMOVE screen.
         if (fraction(cfg.px(cfg.arrowMidX), cfg.py(cfg.arrowMidY), 45) { isArrow(it) } > 0.30) {
+            lastEvent = eventKind(cfg.px(0.50))
             tap(cfg.px(cfg.arrowMidX), cfg.py(cfg.arrowMidY))
             SystemClock.sleep(cfg.menuDelay); return
         }
@@ -350,18 +455,17 @@ class FarmService : Service() {
                 val plane = image.planes[0]
                 buf = plane.buffer; rs = plane.rowStride; ps = plane.pixelStride
                 val f = frameId()
-                val changed = f != lastFrame
                 lastFrame = f
 
                 // watchdog: if the screen hasn't changed in a long while,
                 // whatever we've been doing isn't landing. Nudge the centre.
-                idleCycles = if (changed) 0 else idleCycles + 1
+                idleCycles = if (f != lastFrame) 0 else idleCycles + 1
                 if (idleCycles >= cfg.watchdogAfter) {
                     tap(cfg.px(cfg.fallbackX), cfg.py(cfg.fallbackY))
                     idleCycles = 0
                     SystemClock.sleep(cfg.menuDelay)
                 } else if (inBattle()) {
-                    battleStep(changed)
+                    battleStep()
                 } else {
                     menuStep()
                 }

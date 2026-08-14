@@ -14,6 +14,9 @@ class Cfg(json: String) {
     val pauseX = d("pause_x"); val pauseY = d("pause_y")
 
     val bannerY = d("banner_y")
+    // band swept to locate the hand, so it works regardless of exact layout
+    val handBandTop = o.optDouble("hand_band_top", 0.78)
+    val handBandBottom = o.optDouble("hand_band_bottom", 0.87)
     val artY = d("card_art_y")
     val scanX0 = d("scan_x_min"); val scanX1 = d("scan_x_max")
     val minCardW = d("min_card_width")
@@ -49,7 +52,9 @@ class Cfg(json: String) {
 
     val fallbackX = d("fallback_tap_x"); val fallbackY = d("fallback_tap_y")
     val popupXx = d("popup_x_x"); val popupXy = d("popup_x_y")
-    val endTurnNoRed = o.getBoolean("end_turn_when_no_red")
+    // optBoolean: if an older saved config lacks this key we still default
+    // to the safe red-only behaviour instead of crashing or falling back.
+    val endTurnNoRed = o.optBoolean("end_turn_when_no_red", true)
 
     val actionDelay = (d("action_delay") * 1000).toLong()
     val loopDelay = (d("loop_delay") * 1000).toLong()
@@ -64,6 +69,7 @@ class Cfg(json: String) {
   "pause_x": 0.940, "pause_y": 0.079,
 
   "banner_y": 0.822,
+  "hand_band_top": 0.78, "hand_band_bottom": 0.87,
   "card_art_y": 0.762,
   "scan_x_min": 0.03, "scan_x_max": 0.97,
   "min_card_width": 0.085,
@@ -78,8 +84,8 @@ class Cfg(json: String) {
   "special_fire_threshold": 0.13,
 
   "button_x": 0.50,
-  "button_y_min": 0.66, "button_y_max": 0.975,
-  "button_min_height": 0.018,
+  "button_y_min": 0.62, "button_y_max": 0.975,
+  "button_min_height": 0.012,
   "skip_y_min": 0.86, "skip_y_max": 0.965,
 
   "arrow_y": 0.677,
